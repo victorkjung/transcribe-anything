@@ -191,6 +191,11 @@ def trim_text_chunks(json_data: dict[str, Any]) -> None:
     visit(json_data)
 
 
+def _configure_insane_ffmpeg() -> None:
+    """Use the runtime image's ffmpeg/ffprobe when they are already on PATH."""
+    static_ffmpeg.add_paths(weak=True)
+
+
 def run_insanely_fast_whisper(
     input_wav: Path,
     model: str,
@@ -201,8 +206,8 @@ def run_insanely_fast_whisper(
     other_args: list[str] | None = None,
 ) -> None:
     """Runs insanely fast whisper."""
-    # ffmpeg paths have to be installed or else the backend tool will fail.
-    static_ffmpeg.add_paths()
+    # Prefer the binaries baked into the RunPod image; download only as fallback.
+    _configure_insane_ffmpeg()
     iso_env = get_environment()
     env = dict(os.environ.copy())
     if sys.platform == "darwin":

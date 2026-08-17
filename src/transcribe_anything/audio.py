@@ -12,6 +12,14 @@ from transcribe_anything.util import PROCESS_TIMEOUT
 from transcribe_anything.ytldp_download import ytdlp_download
 
 
+def _ffmpeg_executable() -> str:
+    """Prefer a system ffmpeg, falling back to the static-ffmpeg wrapper."""
+    executable = shutil.which("ffmpeg") or shutil.which("static_ffmpeg")
+    if executable is None:
+        raise FileNotFoundError("No path for ffmpeg or static_ffmpeg")
+    return executable
+
+
 def _convert_to_wav(inpath: str, outpath: str, speech_normalization: bool = False) -> None:
     """Converts a file to wav."""
     # static_ffmpeg -y -i C:\Users\niteris\AppData\Local\Temp\tmp3xhzm1sn\out.webm -filter:a "speechnorm=e=12.5:r=0.00001:l=1" -acodec pcm_s16le -ar 44100 -ac 1 C:\Users\niteris\AppData\Local\Temp\tmpu32zsjov.wav
@@ -20,7 +28,7 @@ def _convert_to_wav(inpath: str, outpath: str, speech_normalization: bool = Fals
     tmpwav.close()
     tmpwavepath = tmpwav.name
 
-    cmd_list = ["static_ffmpeg", "-y", "-i", str(inpath)]
+    cmd_list = [_ffmpeg_executable(), "-y", "-i", str(inpath)]
     if speech_normalization:
         cmd_list += [
             "-filter:a",
@@ -65,11 +73,8 @@ def fetch_audio(url_or_file: str, out_wav: str) -> None:
         abspath = os.path.abspath(url_or_file)
         out_wav_abs = os.path.abspath(out_wav)
         with tempfile.TemporaryDirectory() as tmpdir:
-            static_ffmpeg_path = shutil.which("static_ffmpeg")
-            if static_ffmpeg_path is None:
-                raise FileNotFoundError("No path for static_ffmpeg")
             cmd_list = [
-                static_ffmpeg_path,
+                _ffmpeg_executable(),
                 "-y",
                 "-i",
                 str(abspath),

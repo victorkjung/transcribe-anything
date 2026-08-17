@@ -3,9 +3,10 @@ Main entry point.
 """
 
 import logging
-import os
+import subprocess
 import sys
 
+from transcribe_anything.audio import _ffmpeg_executable
 from transcribe_anything.insanley_fast_whisper_reqs import get_environment
 
 # for resource loading
@@ -28,8 +29,8 @@ def main() -> int:
         env.run(["python", "-c", "import os; print(os.getcwd())"])
     else:
         env.run(["pwd"])
-    print("Installing static ffmpeg...")
-    os.system("static_ffmpeg -version")
+    print("Verifying ffmpeg...")
+    subprocess.run([_ffmpeg_executable(), "-version"], check=True)
     return 0
 
 

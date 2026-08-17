@@ -22,7 +22,7 @@ from typing import Optional
 import static_ffmpeg  # type: ignore
 from appdirs import user_config_dir  # type: ignore
 
-from transcribe_anything.audio import fetch_audio
+from transcribe_anything.audio import _ffmpeg_executable, fetch_audio
 from transcribe_anything.insanely_fast_whisper import run_insanely_fast_whisper
 from transcribe_anything.logger import log_error
 from transcribe_anything.util import chop_double_extension, sanitize_filename
@@ -163,6 +163,11 @@ def get_video_name_from_url(url: str) -> str:
         return os.path.basename(url)
 
 
+def _configure_ffmpeg() -> None:
+    """Use the image's ffmpeg when present; download static binaries only as fallback."""
+    static_ffmpeg.add_paths(weak=True)
+
+
 def transcribe(
     url_or_file: str,
     output_dir: Optional[str] = None,
@@ -195,8 +200,9 @@ def transcribe(
     Returns:
         Path to the output directory containing transcription files
     """
-    # add the paths for any dependent tools that may rely on ffmpeg
-    static_ffmpeg.add_paths()
+    # Prefer an ffmpeg already baked into the runtime image. Download the
+    # static fallback only on platforms where ffmpeg/ffprobe are absent.
+    _configure_ffmpeg()
     if not os.path.isfile(url_or_file) and embed:
         raise NotImplementedError("Embedding is only supported for local files. " + "Please download the file first.")
     # cache = DiskLRUCache(CACHE_FILE, 16)
@@ -307,11 +313,8 @@ def transcribe(
             if embed:
                 assert os.path.isfile(url_or_file), f"Path {url_or_file} doesn't exist."
                 out_mp4 = os.path.join(output_dir, "out.mp4")
-                static_ffmpeg_path = shutil.which("static_ffmpeg")
-                if static_ffmpeg_path is None:
-                    raise FileNotFoundError("static_ffmpeg not found")
                 embed_ffmpeg_cmd_list = [
-                    "static_ffmpeg",
+                    _ffmpeg_executable(),
                     "-y",
                     "-i",
                     url_or_file,
