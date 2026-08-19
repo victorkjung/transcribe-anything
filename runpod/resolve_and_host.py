@@ -90,6 +90,18 @@ YTDLP_BIN = os.environ.get(
     str(_LOCAL_YTDLP) if _LOCAL_YTDLP.exists() else "yt-dlp",
 )
 
+# YouTube now requires an external JS runtime + EJS challenge scripts.
+# Non-interactive SSH PATH is thin, so resolve absolute paths explicitly.
+_JS_RUNTIME_CANDIDATES = (
+    ("deno", Path.home() / ".deno" / "bin" / "deno"),
+    ("deno", Path("/usr/local/bin/deno")),
+    ("deno", Path("/usr/bin/deno")),
+    ("node", Path.home() / ".hermes" / "node" / "bin" / "node"),
+    ("node", Path.home() / ".local" / "bin" / "node"),
+    ("node", Path("/usr/local/bin/node")),
+    ("node", Path("/usr/bin/node")),
+)
+
 DIRECT_AUDIO_CONTENT_TYPES = ("audio/", "application/octet-stream")
 LISTENNOTES_HOSTS = ("lnns.co", "www.listennotes.com", "listennotes.com")
 SPOTIFY_HOSTS = ("open.spotify.com", "spotify.link")
@@ -97,6 +109,122 @@ SPOTIFY_HOSTS = ("open.spotify.com", "spotify.link")
 
 def log(msg: str) -> None:
     print(f"[resolve_and_host] {msg}", file=sys.stderr)
+
+
+def _first_existing(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _resolve_js_runtime() -> tuple[str, Path] | None:
+    """Return (runtime_name, absolute_path) for the preferred JS runtime.
+
+    Preference order:
+      1. YTDLP_JS_RUNTIME env override ("deno[/path]" or "node[/path]")
+      2. deno on PATH / common install locations
+      3. node on PATH / common install locations
+    """
+    override = os.environ.get("YTDLP_JS_RUNTIME", "").strip()
+    if override:
+        if ":" in override:
+            name, raw_path = override.split(":", 1)
+            path = Path(raw_path).expanduser()
+            if path.is_file() and os.access(path, os.X_OK):
+                return name.strip().lower(), path
+        which = shutil.which(override)
+        if which:
+            return Path(which).name.lower().replace(".exe", ""), Path(which)
+
+    # Explicit candidate paths first (reliable under thin SSH PATH), then PATH.
+    by_name: dict[str, list[Path]] = {"deno": [], "node": []}
+    for name, path in _JS_RUNTIME_CANDIDATES:
+        by_name[name].append(path)
+    for name in ("deno", "node"):
+        which = shutil.which(name)
+        if which:
+            by_name[name].append(Path(which))
+        found = _first_existing(by_name[name])
+        if found:
+            return name, found
+    return None
+
+
+def _ytdlp_base_youtube_args() -> list[str]:
+    """Flags required for current YouTube media extraction.
+
+    As of 2026, bare yt-dlp without a JS runtime frequently ends at:
+      HTTP Error 403: Forbidden
+    while selecting android/web formats. Stack that works in production:
+      1. JS runtime (deno preferred) + yt-dlp-ejs
+      2. bgutil PO-token provider on 127.0.0.1:4416 (plugin auto-discovers)
+      3. curl_cffi 0.10–0.15 for browser impersonation
+      4. optional cookies-from-browser fallback for stubborn titles
+    """
+    args: list[str] = []
+    runtime = _resolve_js_runtime()
+    if runtime is None:
+        log(
+            "WARNING: no JS runtime found (deno/node). YouTube downloads will "
+            "likely 403. Install deno (~/.deno/bin) or ensure node is on PATH."
+        )
+    else:
+        name, path = runtime
+        args.extend(["--js-runtimes", f"{name}:{path}"])
+        # If the pipx install lacks yt-dlp-ejs, allow runtime fetch as fallback.
+        # Harmless when the package is already present.
+        if name in {"deno", "bun"}:
+            args.extend(["--remote-components", "ejs:npm"])
+        else:
+            args.extend(["--remote-components", "ejs:github"])
+        log(f"using JS runtime {name}:{path}")
+
+    # Prefer clients that cooperate with PO tokens / progressive media.
+    player_client = os.environ.get(
+        "YTDLP_PLAYER_CLIENT",
+        "mweb,web_safari,default",
+    ).strip()
+    if player_client:
+        args.extend(["--extractor-args", f"youtube:player_client={player_client}"])
+
+    # Browser TLS fingerprint when curl_cffi is installed/supported.
+    impersonate = os.environ.get("YTDLP_IMPERSONATE", "chrome").strip()
+    if impersonate and impersonate.lower() not in {"0", "false", "no", "off"}:
+        args.extend(["--impersonate", impersonate])
+        log(f"using impersonate target {impersonate}")
+
+    # Optional explicit PO-provider base URL (defaults to 127.0.0.1:4416).
+    pot_base = os.environ.get("YTDLP_POT_BASE_URL", "").strip()
+    if pot_base:
+        args.extend(
+            ["--extractor-args", f"youtubepot-bgutilhttp:base_url={pot_base}"]
+        )
+    return args
+
+
+def _cookies_from_browser_arg() -> list[str] | None:
+    """Optional browser-cookie fallback for stubborn YouTube 403s.
+
+    Opt-in only via YTDLP_COOKIES_FROM_BROWSER=chrome|chromium|brave|firefox|...
+    Headless Linux Chrome profiles often store v11 cookies that need a desktop
+    keyring key; auto-detecting them just burns a failed attempt ("no key found").
+    """
+    raw = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+    if not raw or raw.lower() in {"0", "false", "no", "off", "none"}:
+        return None
+    return ["--cookies-from-browser", raw]
+
+
+def _ytdlp_env() -> dict[str, str]:
+    env = os.environ.copy()
+    extra_paths = [
+        str(Path.home() / ".deno" / "bin"),
+        str(Path.home() / ".local" / "bin"),
+        str(Path.home() / ".hermes" / "node" / "bin"),
+    ]
+    env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
+    return env
 
 
 def classify(url: str) -> str:
@@ -309,26 +437,62 @@ def resolve_spotify(url: str) -> str:
     return enclosures[idx]
 
 
+def _find_ytdlp_audio(out_dir: Path) -> Path | None:
+    for cand in out_dir.glob("audio.*"):
+        if cand.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac"):
+            return cand
+    return None
+
+
 def download_with_ytdlp(url: str, out_dir: Path) -> Path:
-    """Run yt-dlp to fetch the best audio stream and convert to mp3."""
+    """Run yt-dlp to fetch the best audio stream and convert to mp3.
+
+    Attempt order:
+      1. JS runtime + EJS + PO provider + impersonation (no cookies)
+      2. Same stack + browser cookies (if a local profile exists / env set)
+    """
     log(f"yt-dlp downloading: {url}")
     out_template = str(out_dir / "audio.%(ext)s")
-    cmd = [
+    base = [
         YTDLP_BIN,
+        *_ytdlp_base_youtube_args(),
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",  # best quality
         "--no-playlist",
         "-o", out_template,
-        url,
     ]
-    log(f"  running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    # yt-dlp drops audio.mp3 (or similar) in the dir
-    for cand in out_dir.glob("audio.*"):
-        if cand.suffix.lower() in (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac"):
-            return cand
-    raise RuntimeError(f"yt-dlp succeeded but no audio file found in {out_dir}")
+    env = _ytdlp_env()
+
+    attempts: list[tuple[str, list[str]]] = [("no-cookies", base + [url])]
+    cookies = _cookies_from_browser_arg()
+    if cookies:
+        attempts.append(("cookies-from-browser", base + cookies + [url]))
+
+    last_err: Exception | None = None
+    for label, cmd in attempts:
+        # Clean partials from a prior failed attempt in the same temp dir.
+        for leftover in out_dir.glob("audio.*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+        log(f"  attempt={label} running: {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True, env=env)
+        except subprocess.CalledProcessError as exc:
+            last_err = exc
+            log(f"  attempt={label} failed: {exc}")
+            continue
+        found = _find_ytdlp_audio(out_dir)
+        if found:
+            return found
+        last_err = RuntimeError(f"yt-dlp succeeded but no audio file found in {out_dir}")
+        log(f"  attempt={label}: {last_err}")
+
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"yt-dlp failed with no attempts for {url}")
 
 
 def download_direct(url: str, out_dir: Path) -> Path:

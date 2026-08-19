@@ -13,16 +13,14 @@ from transcribe_anything.ytldp_download import ytdlp_download
 
 
 def _ffmpeg_executable() -> str:
-    """Prefer a system ffmpeg, falling back to the static-ffmpeg wrapper."""
-    executable = shutil.which("ffmpeg") or shutil.which("static_ffmpeg")
-    if executable is None:
-        raise FileNotFoundError("No path for ffmpeg or static_ffmpeg")
-    return executable
+    """Prefer system ffmpeg; fall back to static_ffmpeg only if needed."""
+    return shutil.which("ffmpeg") or shutil.which("static_ffmpeg") or "ffmpeg"
 
 
 def _convert_to_wav(inpath: str, outpath: str, speech_normalization: bool = False) -> None:
     """Converts a file to wav."""
-    # static_ffmpeg -y -i C:\Users\niteris\AppData\Local\Temp\tmp3xhzm1sn\out.webm -filter:a "speechnorm=e=12.5:r=0.00001:l=1" -acodec pcm_s16le -ar 44100 -ac 1 C:\Users\niteris\AppData\Local\Temp\tmpu32zsjov.wav
+    # Prefer image-baked /usr/bin/ffmpeg on RunPod cold workers so we never hit
+    # the broken static_ffmpeg download path (zackees/ffmpeg_bins v8.0 404).
 
     tmpwav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)  # pylint: disable=consider-using-with
     tmpwav.close()
@@ -73,8 +71,11 @@ def fetch_audio(url_or_file: str, out_wav: str) -> None:
         abspath = os.path.abspath(url_or_file)
         out_wav_abs = os.path.abspath(out_wav)
         with tempfile.TemporaryDirectory() as tmpdir:
+            ffmpeg_path = _ffmpeg_executable()
+            if shutil.which(os.path.basename(ffmpeg_path)) is None and not os.path.isfile(ffmpeg_path):
+                raise FileNotFoundError("No path for ffmpeg/static_ffmpeg")
             cmd_list = [
-                _ffmpeg_executable(),
+                ffmpeg_path,
                 "-y",
                 "-i",
                 str(abspath),

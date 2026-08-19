@@ -3,10 +3,9 @@ Main entry point.
 """
 
 import logging
-import subprocess
+import os
 import sys
 
-from transcribe_anything.audio import _ffmpeg_executable
 from transcribe_anything.insanley_fast_whisper_reqs import get_environment
 
 # for resource loading
@@ -29,8 +28,17 @@ def main() -> int:
         env.run(["python", "-c", "import os; print(os.getcwd())"])
     else:
         env.run(["pwd"])
-    print("Verifying ffmpeg...")
-    subprocess.run([_ffmpeg_executable(), "-version"], check=True)
+    # Prefer system ffmpeg already present in the RunPod image. Invoking the
+    # static_ffmpeg console wrapper can trigger an unconditional binary download
+    # (broken host: zackees/ffmpeg_bins v8.0), so only use it as fallback.
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg") or shutil.which("static_ffmpeg")
+    if ffmpeg:
+        print(f"Verifying ffmpeg at {ffmpeg}...")
+        os.system(f'"{ffmpeg}" -version')
+    else:
+        print("WARNING: neither ffmpeg nor static_ffmpeg found on PATH")
     return 0
 
 
