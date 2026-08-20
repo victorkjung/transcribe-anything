@@ -445,11 +445,16 @@ def _find_ytdlp_audio(out_dir: Path) -> Path | None:
 
 
 def download_with_ytdlp(url: str, out_dir: Path) -> Path:
-    """Run yt-dlp to fetch the best audio stream and convert to mp3.
+    """Run yt-dlp to fetch media and convert its audio to mp3.
 
     Attempt order:
-      1. JS runtime + EJS + PO provider + impersonation (no cookies)
-      2. Same stack + browser cookies (if a local profile exists / env set)
+      1. Best adaptive audio with JS + EJS + PO provider (no cookies)
+      2. Progressive format 18 (audio+video) when adaptive media CDN URLs 403
+      3. Repeat adaptive then format 18 with browser cookies when configured
+
+    Format 18 is deliberately a fallback because long videos can be hundreds of
+    megabytes, but its progressive media URL remains usable when YouTube rejects
+    the otherwise preferable 251/140 adaptive audio URLs.
     """
     log(f"yt-dlp downloading: {url}")
     out_template = str(out_dir / "audio.%(ext)s")
@@ -464,10 +469,18 @@ def download_with_ytdlp(url: str, out_dir: Path) -> Path:
     ]
     env = _ytdlp_env()
 
-    attempts: list[tuple[str, list[str]]] = [("no-cookies", base + [url])]
+    attempts: list[tuple[str, list[str]]] = [
+        ("adaptive-no-cookies", base + [url]),
+        ("progressive-18-no-cookies", base + ["-f", "18", url]),
+    ]
     cookies = _cookies_from_browser_arg()
     if cookies:
-        attempts.append(("cookies-from-browser", base + cookies + [url]))
+        attempts.extend(
+            [
+                ("adaptive-cookies", base + cookies + [url]),
+                ("progressive-18-cookies", base + ["-f", "18"] + cookies + [url]),
+            ]
+        )
 
     last_err: Exception | None = None
     for label, cmd in attempts:
